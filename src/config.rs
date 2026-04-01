@@ -1,0 +1,67 @@
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Settings {
+    pub db_host: String,
+    pub db_port: u16,
+    pub db_name: String,
+    pub db_user: String,
+    pub db_password: String,
+    pub db_max_connections: u32,
+
+    pub jwt_secret: String,
+    pub jwt_ttl_seconds: i64,
+
+    pub encryption_secret: String,
+
+    pub vexa_api_url: String,
+    pub vexa_admin_api_url: String,
+    pub vexa_admin_token: String,
+
+    pub host: String,
+    pub port: u16,
+}
+
+impl Settings {
+    pub fn database_url(&self) -> String {
+        format!(
+            "postgres://{}:{}@{}:{}/{}",
+            self.db_user, self.db_password, self.db_host, self.db_port, self.db_name
+        )
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            db_host: "supabase-db".into(),
+            db_port: 5432,
+            db_name: "companion_hivemind".into(),
+            db_user: "postgres".into(),
+            db_password: "postgres".into(),
+            db_max_connections: 10,
+
+            jwt_secret: "hivemind-secret-change-me".into(),
+            jwt_ttl_seconds: 30 * 24 * 60 * 60,
+
+            encryption_secret: "hivemind-encryption-secret-change-me".into(),
+
+            vexa_api_url: "http://vexa-api-gateway:8000".into(),
+            vexa_admin_api_url: "http://vexa-admin-api:8001".into(),
+            vexa_admin_token: String::new(),
+
+            host: "0.0.0.0".into(),
+            port: 9100,
+        }
+    }
+}
+
+pub fn load() -> Settings {
+    dotenvy::dotenv().ok();
+    config::Config::builder()
+        .add_source(config::Environment::default().separator("__"))
+        .build()
+        .ok()
+        .and_then(|c| c.try_deserialize().ok())
+        .unwrap_or_default()
+}
