@@ -23,3 +23,9 @@ aes-gcm = "0.10"
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+
+# langchain-rust + qdrant
+langchain-rust = { package = "langchain-rust-openrouter", git = "https://github.com/coolcmyk/langchain-rust-openrouter", features = ["qdrant"] }
+qdrant-client = "=1.10.1"
+async-trait = "0.1"
+futures = "0.3"

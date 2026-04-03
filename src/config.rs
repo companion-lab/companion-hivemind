@@ -21,6 +21,15 @@ pub struct Settings {
 
     pub host: String,
     pub port: u16,
+
+    // ─── Embeddings (OpenRouter / OpenAI-compatible) ───────
+    pub embedding_api_url: String,
+    pub embedding_api_key: String,
+    pub embedding_model: String,
+
+    // ─── Qdrant ────────────────────────────────────────────
+    pub qdrant_url: String,
+    pub qdrant_api_key: String,
 }
 
 impl Settings {
@@ -56,6 +65,13 @@ impl Default for Settings {
 
             host: "0.0.0.0".into(),
             port: 9100,
+
+            embedding_api_url: "https://openrouter.ai/api/v1/embeddings".into(),
+            embedding_api_key: String::new(),
+            embedding_model: "openai/text-embedding-3-small".into(),
+
+            qdrant_url: "http://localhost:6334".into(),
+            qdrant_api_key: String::new(),
         }
     }
 }

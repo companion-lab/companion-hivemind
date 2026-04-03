@@ -827,21 +827,16 @@ pub async fn ingest_meeting(
     .await
     {
         Ok(_) => {
-            let chunks = KnowledgeService::chunk_transcript(&req.transcript, meeting_id, req.date);
-            for chunk in chunks {
-                let _ = sqlx::query(
-                    "INSERT INTO knowledge_chunks (id, meeting_id, text, speaker, timestamp, chunk_type, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                )
-                .bind(chunk.id)
-                .bind(chunk.meeting_id)
-                .bind(chunk.text)
-                .bind(chunk.speaker)
-                .bind(chunk.timestamp)
-                .bind(chunk.chunk_type)
-                .bind(chunk.metadata)
-                .bind(chunk.created_at)
-                .execute(&state.db)
-                .await;
+            let docs = KnowledgeService::chunk_transcript(&req.transcript, meeting_id, req.date);
+
+            if let Err(e) = KnowledgeService::ingest_documents(
+                &state.db,
+                &state.vector_store,
+                auth.company_id,
+                meeting_id,
+                &docs,
+            ).await {
+                tracing::error!(error = %e, "Failed to ingest knowledge chunks into vector store");
             }
 
             Json(ApiResponse::success(MeetingOut {
@@ -893,7 +888,13 @@ pub async fn search_knowledge(
     auth: AuthContext,
     Json(req): Json<KnowledgeSearchRequest>,
 ) -> Json<ApiResponse<Vec<KnowledgeSearchResult>>> {
-    match KnowledgeService::search(&state.db, auth.company_id, &req.query, req.limit).await {
+    match KnowledgeService::search(
+        &state.db,
+        &state.vector_store,
+        auth.company_id,
+        &req.query,
+        req.limit,
+    ).await {
         Ok(results) => Json(ApiResponse::success(results)),
         Err(e) => Json(ApiResponse::error(e.to_string())),
     }

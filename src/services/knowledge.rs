@@ -1,8 +1,12 @@
 use uuid::Uuid;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use langchain_rust::schemas::Document;
+
 use crate::api::{TranscriptSegment, KnowledgeSearchResult};
+use crate::services::vector::HivemindVectorStore;
 
 const CHUNK_SIZE: usize = 400;
 const CHUNK_OVERLAP: usize = 80;
@@ -10,107 +14,152 @@ const CHUNK_OVERLAP: usize = 80;
 pub struct KnowledgeService;
 
 impl KnowledgeService {
+    /// Chunk a transcript into langchain-rust Documents with metadata.
     pub fn chunk_transcript(
         segments: &[TranscriptSegment],
         meeting_id: Uuid,
         meeting_date: i64,
-    ) -> Vec<ChunkRow> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let mut chunks = Vec::new();
+    ) -> Vec<Document> {
+        let mut docs = Vec::new();
 
         for seg in segments {
             let sub_chunks = split_text(&seg.text, CHUNK_SIZE, CHUNK_OVERLAP);
             for text in sub_chunks {
-                chunks.push(ChunkRow {
-                    id: Uuid::new_v4(),
-                    meeting_id,
-                    segment_id: None,
-                    text,
-                    speaker: if seg.speaker.is_empty() { None } else { Some(seg.speaker.clone()) },
-                    timestamp: Some(meeting_date + (seg.start_time * 1000.0) as i64),
-                    chunk_type: "transcript".into(),
-                    embedding: None,
-                    metadata: serde_json::json!({
-                        "start": seg.start_time,
-                        "end": seg.end_time,
-                    }),
-                    created_at: now,
+                let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
+                metadata.insert("meeting_id".to_string(), serde_json::json!(meeting_id.to_string()));
+                metadata.insert("start".to_string(), serde_json::json!(seg.start_time));
+                metadata.insert("end".to_string(), serde_json::json!(seg.end_time));
+                metadata.insert("chunk_type".to_string(), serde_json::json!("transcript"));
+
+                if !seg.speaker.is_empty() {
+                    metadata.insert("speaker".to_string(), serde_json::json!(seg.speaker));
+                }
+                metadata.insert(
+                    "timestamp".to_string(),
+                    serde_json::json!(meeting_date + (seg.start_time * 1000.0) as i64),
+                );
+
+                docs.push(Document {
+                    page_content: text,
+                    metadata,
+                    score: 0.0,
                 });
             }
         }
-        chunks
+        docs
     }
 
+    /// Ingest chunked documents into both Postgres (for persistence) and Qdrant (for vector search).
+    pub async fn ingest_documents(
+        db: &PgPool,
+        vector_store: &HivemindVectorStore,
+        company_id: Uuid,
+        meeting_id: Uuid,
+        docs: &[Document],
+    ) -> anyhow::Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        for doc in docs {
+            // Extract metadata fields
+            let speaker = doc.metadata.get("speaker").and_then(|v| v.as_str()).map(String::from);
+            let timestamp = doc.metadata.get("timestamp").and_then(|v| v.as_i64());
+            let metadata_json = serde_json::to_value(&doc.metadata).unwrap_or(serde_json::json!({}));
+
+            // Insert into Postgres
+            sqlx::query(
+                "INSERT INTO knowledge_chunks (id, meeting_id, text, speaker, timestamp, chunk_type, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(meeting_id)
+            .bind(&doc.page_content)
+            .bind(&speaker)
+            .bind(timestamp)
+            .bind("transcript")
+            .bind(&metadata_json)
+            .bind(now)
+            .execute(db)
+            .await?;
+        }
+
+        // Upsert into Qdrant with company scope
+        vector_store
+            .add_documents_for_company(company_id, docs)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to add documents to vector store: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Search knowledge using vector similarity via Qdrant.
     pub async fn search(
         db: &PgPool,
+        vector_store: &HivemindVectorStore,
         company_id: Uuid,
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeSearchResult>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT kc.id, kc.meeting_id, kc.text, kc.speaker, kc.timestamp,
-                   kc.chunk_type, kc.metadata, m.title, m.date,
-                   ts_rank(to_tsvector('english', kc.text), plainto_tsquery('english', $3)) as score
-            FROM knowledge_chunks kc
-            JOIN meetings m ON m.id = kc.meeting_id
-            WHERE m.company_id = $1
-              AND to_tsvector('english', kc.text) @@ plainto_tsquery('english', $3)
-            ORDER BY score DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(company_id)
-        .bind(limit as i64)
-        .bind(query)
-        .fetch_all(db)
-        .await?;
+        let docs = vector_store
+            .search_for_company(company_id, query, limit)
+            .await
+            .map_err(|e| anyhow::anyhow!("Vector search failed: {}", e))?;
 
-        let results = rows
-            .into_iter()
-            .map(|r| {
-                let score: Option<f64> = r.try_get("score").ok().or(Some(0.0));
-                KnowledgeSearchResult {
-                    chunk: serde_json::json!({
-                        "id": r.get::<Uuid, _>("id"),
-                        "meeting_id": r.get::<Uuid, _>("meeting_id"),
-                        "text": r.get::<String, _>("text"),
-                        "speaker": r.try_get::<Option<String>, _>("speaker").ok().flatten(),
-                        "timestamp": r.try_get::<Option<i64>, _>("timestamp").ok().flatten(),
-                        "chunk_type": r.get::<String, _>("chunk_type"),
-                        "metadata": r.get::<serde_json::Value, _>("metadata"),
-                    }),
-                    meeting: serde_json::json!({
-                        "id": r.get::<Uuid, _>("meeting_id"),
-                        "title": r.get::<String, _>("title"),
-                        "date": r.get::<i64, _>("date"),
-                    }),
-                    score: score.unwrap_or(0.0),
-                }
-            })
-            .collect();
+        let mut results = Vec::new();
+
+        for doc in docs {
+            let meeting_id = doc
+                .metadata
+                .get("meeting_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+
+            if let Some(mid) = meeting_id {
+                // Enrich with meeting data from Postgres
+                let meeting_row = sqlx::query(
+                    "SELECT id, title, date FROM meetings WHERE id = $1 AND company_id = $2",
+                )
+                .bind(mid)
+                .bind(company_id)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+
+                let chunk_json = serde_json::json!({
+                    "text": doc.page_content,
+                    "speaker": doc.metadata.get("speaker").and_then(|v| v.as_str()),
+                    "timestamp": doc.metadata.get("timestamp").and_then(|v| v.as_i64()),
+                    "chunk_type": doc.metadata.get("chunk_type").and_then(|v| v.as_str()).unwrap_or("transcript"),
+                    "metadata": doc.metadata,
+                    "meeting_id": mid.to_string(),
+                });
+
+                let meeting_json = if let Some(row) = meeting_row {
+                    serde_json::json!({
+                        "id": row.get::<Uuid, _>("id"),
+                        "title": row.get::<String, _>("title"),
+                        "date": row.get::<i64, _>("date"),
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": mid.to_string(),
+                        "title": "Unknown",
+                        "date": 0,
+                    })
+                };
+
+                results.push(KnowledgeSearchResult {
+                    chunk: chunk_json,
+                    meeting: meeting_json,
+                    score: doc.score,
+                });
+            }
+        }
 
         Ok(results)
     }
-}
-
-#[derive(Debug)]
-pub struct ChunkRow {
-    pub id: Uuid,
-    pub meeting_id: Uuid,
-    #[allow(dead_code)]
-    pub segment_id: Option<Uuid>,
-    pub text: String,
-    pub speaker: Option<String>,
-    pub timestamp: Option<i64>,
-    pub chunk_type: String,
-    #[allow(dead_code)]
-    pub embedding: Option<serde_json::Value>,
-    pub metadata: serde_json::Value,
-    pub created_at: i64,
 }
 
 fn split_text(text: &str, size: usize, overlap: usize) -> Vec<String> {

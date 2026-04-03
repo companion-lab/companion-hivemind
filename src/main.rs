@@ -4,17 +4,24 @@ mod api;
 
 use sqlx::PgPool;
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+use crate::services::embedding::HivemindEmbedder;
+use crate::services::vector::HivemindVectorStore;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub settings: config::Settings,
+    pub vector_store: Arc<HivemindVectorStore>,
 }
 
 mod services {
     pub mod auth;
     pub mod crypto;
+    pub mod embedding;
     pub mod knowledge;
+    pub mod vector;
 }
 
 #[tokio::main]
@@ -29,7 +36,29 @@ async fn main() -> anyhow::Result<()> {
     let settings = config::load();
     let db = db::connect(&settings).await?;
 
-    let state = AppState { db, settings: settings.clone() };
+    // Initialize embedding service (OpenRouter / OpenAI-compatible)
+    let embedder = Arc::new(HivemindEmbedder::new(
+        &settings.embedding_api_key,
+        &settings.embedding_model,
+        Some(&settings.embedding_api_url),
+    ));
+
+    // Initialize Qdrant vector store
+    let vector_store = Arc::new(
+        HivemindVectorStore::new(
+            &settings.qdrant_url,
+            &settings.qdrant_api_key,
+            embedder,
+        )
+        .await?,
+    );
+    vector_store.ensure_collection().await?;
+
+    let state = AppState {
+        db,
+        settings: settings.clone(),
+        vector_store,
+    };
     let app = api::router(state);
 
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
