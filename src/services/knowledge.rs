@@ -1,17 +1,24 @@
 use uuid::Uuid;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use langchain_rust::schemas::Document;
 
-use crate::api::{TranscriptSegment, KnowledgeSearchResult};
+use crate::errors::AppError;
+use crate::types::{KnowledgeSearchResult, TranscriptSegment};
 use crate::services::vector::HivemindVectorStore;
 
 const CHUNK_SIZE: usize = 400;
 const CHUNK_OVERLAP: usize = 80;
 
 pub struct KnowledgeService;
+
+/// A knowledge document ready for vector ingestion.
+pub struct KnowledgeDocument {
+    pub content: String,
+    pub metadata: serde_json::Value,
+}
 
 impl KnowledgeService {
     /// Chunk a transcript into langchain-rust Documents with metadata.
@@ -56,19 +63,17 @@ impl KnowledgeService {
         company_id: Uuid,
         meeting_id: Uuid,
         docs: &[Document],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), AppError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system time before UNIX epoch")
             .as_millis() as i64;
 
         for doc in docs {
-            // Extract metadata fields
             let speaker = doc.metadata.get("speaker").and_then(|v| v.as_str()).map(String::from);
             let timestamp = doc.metadata.get("timestamp").and_then(|v| v.as_i64());
             let metadata_json = serde_json::to_value(&doc.metadata).unwrap_or(serde_json::json!({}));
 
-            // Insert into Postgres
             sqlx::query(
                 "INSERT INTO knowledge_chunks (id, meeting_id, text, speaker, timestamp, chunk_type, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
@@ -81,14 +86,14 @@ impl KnowledgeService {
             .bind(&metadata_json)
             .bind(now)
             .execute(db)
-            .await?;
+            .await
+            .map_err(AppError::from)?;
         }
 
-        // Upsert into Qdrant with company scope
         vector_store
             .add_documents_for_company(company_id, docs)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to add documents to vector store: {}", e))?;
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to add documents to vector store: {}", e)))?;
 
         Ok(())
     }
@@ -100,11 +105,11 @@ impl KnowledgeService {
         company_id: Uuid,
         query: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<KnowledgeSearchResult>> {
+    ) -> Result<Vec<KnowledgeSearchResult>, AppError> {
         let docs = vector_store
             .search_for_company(company_id, query, limit)
             .await
-            .map_err(|e| anyhow::anyhow!("Vector search failed: {}", e))?;
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Vector search failed: {}", e)))?;
 
         let mut results = Vec::new();
 
@@ -116,7 +121,6 @@ impl KnowledgeService {
                 .and_then(|s| Uuid::parse_str(s).ok());
 
             if let Some(mid) = meeting_id {
-                // Enrich with meeting data from Postgres
                 let meeting_row = sqlx::query(
                     "SELECT id, title, date FROM meetings WHERE id = $1 AND company_id = $2",
                 )
@@ -137,6 +141,7 @@ impl KnowledgeService {
                 });
 
                 let meeting_json = if let Some(row) = meeting_row {
+                    use sqlx::Row;
                     serde_json::json!({
                         "id": row.get::<Uuid, _>("id"),
                         "title": row.get::<String, _>("title"),
