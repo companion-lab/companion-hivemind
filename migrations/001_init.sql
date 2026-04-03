@@ -126,3 +126,46 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_company ON auth_tokens(company_id);
+
+-- remote chat sessions
+CREATE TABLE IF NOT EXISTS sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'idle',
+    cwd TEXT,
+    model VARCHAR(255),
+    mode VARCHAR(32) NOT NULL DEFAULT 'research',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_company_user_updated ON sessions(company_id, user_id, updated_at DESC);
+
+-- remote chat messages
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role VARCHAR(16) NOT NULL,
+    content JSONB NOT NULL DEFAULT '[]',
+    timestamp BIGINT NOT NULL,
+    token_usage JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp ASC);
+
+-- remote trace steps
+CREATE TABLE IF NOT EXISTS trace_steps (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    type VARCHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    content TEXT,
+    tool_name VARCHAR(255),
+    tool_input JSONB,
+    tool_output TEXT,
+    is_error BOOLEAN,
+    timestamp BIGINT NOT NULL,
+    duration BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_trace_steps_session_timestamp ON trace_steps(session_id, timestamp ASC);

@@ -8,6 +8,7 @@ pub struct Settings {
     pub db_user: String,
     pub db_password: String,
     pub db_max_connections: u32,
+    pub db_schema: String,
 
     pub jwt_secret: String,
     pub jwt_ttl_seconds: i64,
@@ -23,11 +24,13 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn database_url(&self) -> String {
-        format!(
-            "postgres://{}:{}@{}:{}/{}",
-            self.db_user, self.db_password, self.db_host, self.db_port, self.db_name
-        )
+    pub fn normalized_db_schema(&self) -> String {
+        let schema = self.db_schema.trim();
+        if schema.is_empty() {
+            "hivemind".into()
+        } else {
+            schema.into()
+        }
     }
 }
 
@@ -36,10 +39,11 @@ impl Default for Settings {
         Self {
             db_host: "supabase-db".into(),
             db_port: 5432,
-            db_name: "companion_hivemind".into(),
+            db_name: "postgres".into(),
             db_user: "postgres".into(),
             db_password: "postgres".into(),
             db_max_connections: 10,
+            db_schema: "hivemind".into(),
 
             jwt_secret: "hivemind-secret-change-me".into(),
             jwt_ttl_seconds: 30 * 24 * 60 * 60,

@@ -1,0 +1,2 @@
+ALTER TABLE auth_tokens
+ALTER COLUMN token TYPE TEXT;

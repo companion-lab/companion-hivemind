@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Json,
-    routing::{get, post, put, delete},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -249,7 +249,7 @@ pub struct KnowledgeSearchResult {
 
 #[derive(Deserialize)]
 pub struct UsageRecord {
-    pub user_id: Uuid,
+    pub user_id: Option<Uuid>,
     pub session_id: String,
     pub model: String,
     pub provider: String,
@@ -267,6 +267,100 @@ pub struct UsageSummary {
     pub total_cost_cents: i64,
     pub session_count: i64,
     pub last_active_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionCreateRequest {
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionPatchRequest {
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SessionOut {
+    pub id: Uuid,
+    pub company_id: Uuid,
+    pub user_id: Uuid,
+    pub title: String,
+    pub status: String,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub mode: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Deserialize)]
+pub struct MessageCreateRequest {
+    pub id: Uuid,
+    pub role: String,
+    pub content: serde_json::Value,
+    pub timestamp: i64,
+    pub token_usage: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct MessageOut {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub role: String,
+    pub content: serde_json::Value,
+    pub timestamp: i64,
+    pub token_usage: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+pub struct TraceStepCreateRequest {
+    pub id: Uuid,
+    pub r#type: String,
+    pub status: String,
+    pub title: String,
+    pub content: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_output: Option<String>,
+    pub is_error: Option<bool>,
+    pub timestamp: i64,
+    pub duration: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct TraceStepPatchRequest {
+    pub r#type: Option<String>,
+    pub status: Option<String>,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_output: Option<String>,
+    pub is_error: Option<bool>,
+    pub timestamp: Option<i64>,
+    pub duration: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TraceStepOut {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub r#type: String,
+    pub status: String,
+    pub title: String,
+    pub content: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_output: Option<String>,
+    pub is_error: Option<bool>,
+    pub timestamp: i64,
+    pub duration: Option<i64>,
 }
 
 // ─── Auth routes ─────────────────────────────────────────────────────────────
@@ -313,6 +407,47 @@ pub async fn sign_out(
     .execute(&state.db)
     .await;
     Json(ApiResponse::success(()))
+}
+
+pub async fn auth_me(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    headers: axum::http::HeaderMap,
+) -> Json<ApiResponse<AuthSession>> {
+    match sqlx::query(
+        r#"
+        SELECT u.email, u.name, c.name AS company_name, c.slug AS company_slug, cm.role
+        FROM users u
+        JOIN companies c ON c.id = $1
+        JOIN company_members cm ON cm.user_id = $2 AND cm.company_id = $1
+        WHERE u.id = $2
+        "#,
+    )
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(row) => {
+            let token = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or_default()
+                .to_string();
+            Json(ApiResponse::success(AuthSession {
+                user_id: auth.user_id,
+                email: row.get("email"),
+                name: row.get("name"),
+                company_id: auth.company_id,
+                company_name: row.get("company_name"),
+                company_slug: row.get("company_slug"),
+                role: row.get("role"),
+                token,
+            }))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
 }
 
 // ─── Company routes ──────────────────────────────────────────────────────────
@@ -850,6 +985,322 @@ pub async fn get_usage_summary(
     }
 }
 
+// ─── Remote sessions / messages / traces ─────────────────────────────────────
+
+pub async fn create_session(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(req): Json<SessionCreateRequest>,
+) -> Json<ApiResponse<SessionOut>> {
+    let id = Uuid::new_v4();
+    let now = now_ms();
+    let title = req.title.unwrap_or_else(|| "New conversation".into());
+    let mode = req.mode.unwrap_or_else(|| "research".into());
+
+    match sqlx::query(
+        r#"
+        INSERT INTO sessions (id, company_id, user_id, title, status, cwd, model, mode, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, 'idle', $5, $6, $7, $8, $8)
+        "#,
+    )
+    .bind(id)
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .bind(&title)
+    .bind(&req.cwd)
+    .bind(&req.model)
+    .bind(&mode)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    {
+        Ok(_) => Json(ApiResponse::success(SessionOut {
+            id,
+            company_id: auth.company_id,
+            user_id: auth.user_id,
+            title,
+            status: "idle".into(),
+            cwd: req.cwd,
+            model: req.model,
+            mode,
+            created_at: now,
+            updated_at: now,
+        })),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Json<ApiResponse<Vec<SessionOut>>> {
+    match sqlx::query(
+        r#"
+        SELECT id, company_id, user_id, title, status, cwd, model, mode, created_at, updated_at
+        FROM sessions
+        WHERE company_id = $1 AND user_id = $2
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => Json(ApiResponse::success(rows.into_iter().map(session_from_row).collect())),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn get_session(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+) -> Json<ApiResponse<SessionOut>> {
+    match sqlx::query(
+        r#"
+        SELECT id, company_id, user_id, title, status, cwd, model, mode, created_at, updated_at
+        FROM sessions
+        WHERE id = $1 AND company_id = $2 AND user_id = $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(row)) => Json(ApiResponse::success(session_from_row(row))),
+        Ok(None) => Json(ApiResponse::error("Session not found")),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn update_session(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+    Json(req): Json<SessionPatchRequest>,
+) -> Json<ApiResponse<SessionOut>> {
+    let now = now_ms();
+    match sqlx::query(
+        r#"
+        UPDATE sessions
+        SET title = COALESCE($4, title),
+            status = COALESCE($5, status),
+            model = COALESCE($6, model),
+            mode = COALESCE($7, mode),
+            updated_at = $8
+        WHERE id = $1 AND company_id = $2 AND user_id = $3
+        RETURNING id, company_id, user_id, title, status, cwd, model, mode, created_at, updated_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .bind(req.title)
+    .bind(req.status)
+    .bind(req.model)
+    .bind(req.mode)
+    .bind(now)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(row)) => Json(ApiResponse::success(session_from_row(row))),
+        Ok(None) => Json(ApiResponse::error("Session not found")),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn delete_session(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+) -> Json<ApiResponse<()>> {
+    match sqlx::query(
+        "DELETE FROM sessions WHERE id = $1 AND company_id = $2 AND user_id = $3",
+    )
+    .bind(session_id)
+    .bind(auth.company_id)
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await
+    {
+        Ok(result) if result.rows_affected() > 0 => Json(ApiResponse::success(())),
+        Ok(_) => Json(ApiResponse::error("Session not found")),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn list_messages(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+) -> Json<ApiResponse<Vec<MessageOut>>> {
+    if !session_accessible(&state.db, session_id, auth.company_id, auth.user_id).await {
+        return Json(ApiResponse::error("Session not found"));
+    }
+
+    match sqlx::query(
+        "SELECT id, session_id, role, content, timestamp, token_usage FROM messages WHERE session_id = $1 ORDER BY timestamp ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => Json(ApiResponse::success(rows.into_iter().map(message_from_row).collect())),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn create_message(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+    Json(req): Json<MessageCreateRequest>,
+) -> Json<ApiResponse<MessageOut>> {
+    if !session_accessible(&state.db, session_id, auth.company_id, auth.user_id).await {
+        return Json(ApiResponse::error("Session not found"));
+    }
+
+    match sqlx::query(
+        r#"
+        INSERT INTO messages (id, session_id, role, content, timestamp, token_usage)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, session_id, role, content, timestamp, token_usage
+        "#,
+    )
+    .bind(req.id)
+    .bind(session_id)
+    .bind(req.role)
+    .bind(req.content)
+    .bind(req.timestamp)
+    .bind(req.token_usage)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(row) => Json(ApiResponse::success(message_from_row(row))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn list_trace_steps(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+) -> Json<ApiResponse<Vec<TraceStepOut>>> {
+    if !session_accessible(&state.db, session_id, auth.company_id, auth.user_id).await {
+        return Json(ApiResponse::error("Session not found"));
+    }
+
+    match sqlx::query(
+        "SELECT id, session_id, type, status, title, content, tool_name, tool_input, tool_output, is_error, timestamp, duration FROM trace_steps WHERE session_id = $1 ORDER BY timestamp ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => Json(ApiResponse::success(rows.into_iter().map(trace_step_from_row).collect())),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn create_trace_step(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+    Json(req): Json<TraceStepCreateRequest>,
+) -> Json<ApiResponse<TraceStepOut>> {
+    if !session_accessible(&state.db, session_id, auth.company_id, auth.user_id).await {
+        return Json(ApiResponse::error("Session not found"));
+    }
+
+    match sqlx::query(
+        r#"
+        INSERT INTO trace_steps (id, session_id, type, status, title, content, tool_name, tool_input, tool_output, is_error, timestamp, duration)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (id) DO UPDATE SET
+            type = EXCLUDED.type,
+            status = EXCLUDED.status,
+            title = EXCLUDED.title,
+            content = EXCLUDED.content,
+            tool_name = EXCLUDED.tool_name,
+            tool_input = EXCLUDED.tool_input,
+            tool_output = EXCLUDED.tool_output,
+            is_error = EXCLUDED.is_error,
+            timestamp = EXCLUDED.timestamp,
+            duration = EXCLUDED.duration
+        RETURNING id, session_id, type, status, title, content, tool_name, tool_input, tool_output, is_error, timestamp, duration
+        "#,
+    )
+    .bind(req.id)
+    .bind(session_id)
+    .bind(req.r#type)
+    .bind(req.status)
+    .bind(req.title)
+    .bind(req.content)
+    .bind(req.tool_name)
+    .bind(req.tool_input)
+    .bind(req.tool_output)
+    .bind(req.is_error)
+    .bind(req.timestamp)
+    .bind(req.duration)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(row) => Json(ApiResponse::success(trace_step_from_row(row))),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+pub async fn update_trace_step(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Path((session_id, trace_id)): axum::extract::Path<(Uuid, Uuid)>,
+    Json(req): Json<TraceStepPatchRequest>,
+) -> Json<ApiResponse<TraceStepOut>> {
+    if !session_accessible(&state.db, session_id, auth.company_id, auth.user_id).await {
+        return Json(ApiResponse::error("Session not found"));
+    }
+
+    match sqlx::query(
+        r#"
+        UPDATE trace_steps
+        SET type = COALESCE($3, type),
+            status = COALESCE($4, status),
+            title = COALESCE($5, title),
+            content = COALESCE($6, content),
+            tool_name = COALESCE($7, tool_name),
+            tool_input = COALESCE($8, tool_input),
+            tool_output = COALESCE($9, tool_output),
+            is_error = COALESCE($10, is_error),
+            timestamp = COALESCE($11, timestamp),
+            duration = COALESCE($12, duration)
+        WHERE id = $1 AND session_id = $2
+        RETURNING id, session_id, type, status, title, content, tool_name, tool_input, tool_output, is_error, timestamp, duration
+        "#,
+    )
+    .bind(trace_id)
+    .bind(session_id)
+    .bind(req.r#type)
+    .bind(req.status)
+    .bind(req.title)
+    .bind(req.content)
+    .bind(req.tool_name)
+    .bind(req.tool_input)
+    .bind(req.tool_output)
+    .bind(req.is_error)
+    .bind(req.timestamp)
+    .bind(req.duration)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(row)) => Json(ApiResponse::success(trace_step_from_row(row))),
+        Ok(None) => Json(ApiResponse::error("Trace step not found")),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
 // ─── Vexa integration routes ────────────────────────────────────────────────
 
 pub async fn vexa_request_bot(
@@ -910,6 +1361,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register/member", post(register_member))
         .route("/auth/signin", post(sign_in))
         .route("/auth/signout", post(sign_out))
+        .route("/auth/me", get(auth_me))
         .route("/company/config", get(get_company_config))
         .route("/company/config", put(update_company_config))
         .route("/company/members", get(list_members))
@@ -920,10 +1372,20 @@ pub fn router(state: AppState) -> Router {
         .route("/company/invites/:invite_id", delete(remove_invite))
         .route("/company/apikeys/:user_id", get(list_api_keys))
         .route("/company/apikeys", post(set_api_key))
-        .route("/company/apikeys/:key_id", delete(delete_api_key))
+        .route("/company/apikeys/key/:key_id", delete(delete_api_key))
         .route("/meetings", get(list_meetings))
         .route("/meetings", post(ingest_meeting))
         .route("/knowledge/search", post(search_knowledge))
+        .route("/sessions", get(list_sessions))
+        .route("/sessions", post(create_session))
+        .route("/sessions/:session_id", get(get_session))
+        .route("/sessions/:session_id", patch(update_session))
+        .route("/sessions/:session_id", delete(delete_session))
+        .route("/sessions/:session_id/messages", get(list_messages))
+        .route("/sessions/:session_id/messages", post(create_message))
+        .route("/sessions/:session_id/traces", get(list_trace_steps))
+        .route("/sessions/:session_id/traces", post(create_trace_step))
+        .route("/sessions/:session_id/traces/:trace_id", patch(update_trace_step))
         .route("/usage", post(record_usage))
         .route("/usage/summary", get(get_usage_summary))
         .route("/vexa/bots", post(vexa_request_bot))
@@ -941,6 +1403,68 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+async fn session_accessible(
+    db: &sqlx::PgPool,
+    session_id: Uuid,
+    company_id: Uuid,
+    user_id: Uuid,
+) -> bool {
+    matches!(
+        sqlx::query(
+            "SELECT 1 FROM sessions WHERE id = $1 AND company_id = $2 AND user_id = $3",
+        )
+        .bind(session_id)
+        .bind(company_id)
+        .bind(user_id)
+        .fetch_optional(db)
+        .await,
+        Ok(Some(_))
+    )
+}
+
+fn session_from_row(row: sqlx::postgres::PgRow) -> SessionOut {
+    SessionOut {
+        id: row.get("id"),
+        company_id: row.get("company_id"),
+        user_id: row.get("user_id"),
+        title: row.get("title"),
+        status: row.get("status"),
+        cwd: row.get("cwd"),
+        model: row.get("model"),
+        mode: row.get("mode"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn message_from_row(row: sqlx::postgres::PgRow) -> MessageOut {
+    MessageOut {
+        id: row.get("id"),
+        session_id: row.get("session_id"),
+        role: row.get("role"),
+        content: row.get("content"),
+        timestamp: row.get("timestamp"),
+        token_usage: row.get("token_usage"),
+    }
+}
+
+fn trace_step_from_row(row: sqlx::postgres::PgRow) -> TraceStepOut {
+    TraceStepOut {
+        id: row.get("id"),
+        session_id: row.get("session_id"),
+        r#type: row.get("type"),
+        status: row.get("status"),
+        title: row.get("title"),
+        content: row.get("content"),
+        tool_name: row.get("tool_name"),
+        tool_input: row.get("tool_input"),
+        tool_output: row.get("tool_output"),
+        is_error: row.get("is_error"),
+        timestamp: row.get("timestamp"),
+        duration: row.get("duration"),
+    }
 }
 
 fn mask_key(key: &str) -> String {
