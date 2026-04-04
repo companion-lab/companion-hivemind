@@ -1,21 +1,34 @@
 use async_trait::async_trait;
-use langchain_rust::embedding::{embedder_trait::Embedder, EmbedderError, openrouter::OpenrouterEmbedder};
+use langchain_rust::embedding::{embedder_trait::Embedder, EmbedderError, ollama::OllamaEmbedder as LcOllamaEmbedder};
+use ollama_rs::Ollama;
 use std::sync::Arc;
+use url::Url;
 
-/// Wrapper around langchain-rust-openrouter's OpenrouterEmbedder.
+/// Embedding backend supported by the hivemind service.
+#[derive(Clone)]
+pub enum EmbedderBackend {
+    Ollama(Arc<LcOllamaEmbedder>),
+}
+
+/// Wrapper that dispatches to the configured embedder backend.
 #[derive(Clone)]
 pub struct HivemindEmbedder {
-    inner: Arc<OpenrouterEmbedder>,
+    backend: EmbedderBackend,
 }
 
 impl HivemindEmbedder {
-    pub fn new(api_key: &str, model: &str, base_url: Option<&str>) -> Self {
-        let mut embedder = OpenrouterEmbedder::new(api_key, model);
-        if let Some(url) = base_url {
-            embedder = embedder.with_base_url(url);
-        }
+    /// Create an Ollama-based embedder.
+    pub fn new_ollama(base_url: &str, model: &str) -> Self {
+        let url = Url::parse(base_url).unwrap_or_else(|_| {
+            Url::parse(&format!("http://{}", base_url)).expect("invalid Ollama URL")
+        });
+        let host = url.host_str().unwrap_or("localhost");
+        let port = url.port().unwrap_or(11434);
+        let full_url = format!("http://{}:{}", host, port);
+        let client = Ollama::try_new(full_url).expect("failed to create Ollama client");
+        let embedder = LcOllamaEmbedder::new(Arc::new(client), model, None);
         Self {
-            inner: Arc::new(embedder),
+            backend: EmbedderBackend::Ollama(Arc::new(embedder)),
         }
     }
 }
@@ -23,10 +36,14 @@ impl HivemindEmbedder {
 #[async_trait]
 impl Embedder for HivemindEmbedder {
     async fn embed_documents(&self, documents: &[String]) -> Result<Vec<Vec<f64>>, EmbedderError> {
-        self.inner.embed_documents(documents).await
+        match &self.backend {
+            EmbedderBackend::Ollama(e) => e.embed_documents(documents).await,
+        }
     }
 
     async fn embed_query(&self, text: &str) -> Result<Vec<f64>, EmbedderError> {
-        self.inner.embed_query(text).await
+        match &self.backend {
+            EmbedderBackend::Ollama(e) => e.embed_query(text).await,
+        }
     }
 }

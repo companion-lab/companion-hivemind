@@ -9,3 +9,4 @@ pub mod message;
 pub mod trace;
 pub mod usage;
 pub mod vexa;
+pub mod knowledge;

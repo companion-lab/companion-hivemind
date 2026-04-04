@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::repos::auth;
-use crate::types::Claims;
 
 #[derive(Debug, Clone)]
 pub struct AuthContext {
@@ -57,6 +56,36 @@ impl axum::extract::FromRequestParts<AppState> for AuthContext {
                 }),
             )
         })?;
+
+        // Validate that the company still exists in the database.
+        // This prevents FK violations when the DB was reset but the client
+        // is still using an old JWT token.
+        let company_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM companies WHERE id = $1)",
+        )
+        .bind(claims.company_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to validate company: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    ok: false,
+                    error: "Internal server error".into(),
+                }),
+            )
+        })?;
+
+        if !company_exists {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    ok: false,
+                    error: "Company not found. Please re-authenticate.".into(),
+                }),
+            ));
+        }
 
         Ok(AuthContext {
             user_id: claims.user_id,

@@ -39,29 +39,48 @@ impl HivemindVectorStore {
 
     /// Ensure the collection exists, creating it with the embedder's dimension.
     pub async fn ensure_collection(&self) -> anyhow::Result<()> {
-        let exists = self.client.collection_exists(&self.collection_name).await?;
+        let exists = match self.client.collection_exists(&self.collection_name).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not check Qdrant collection existence");
+                return Ok(()); // Don't crash on Qdrant errors
+            }
+        };
         if exists {
             return Ok(());
         }
 
-        // Get embedding dimension by embedding a test string
-        let test_embedding = self.embedder.embed_query("test").await?;
-        let dimension = test_embedding.len() as u64;
+        // Get embedding dimension by embedding a test string, fallback to default
+        let dimension = match self.embedder.embed_query("test").await {
+            Ok(embedding) => embedding.len() as u64,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Could not determine embedding dimension from API, using default 1536 (text-embedding-3-small)"
+                );
+                1536u64
+            }
+        };
 
         use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
 
-        self.client
+        // Try to create the collection, but don't fail if it already exists
+        // (another instance may have created it)
+        if let Err(e) = self.client
             .create_collection(
                 CreateCollectionBuilder::new(&self.collection_name)
                     .vectors_config(VectorParamsBuilder::new(dimension, Distance::Cosine)),
             )
-            .await?;
-
-        tracing::info!(
-            collection = %self.collection_name,
-            dimension = dimension,
-            "Qdrant collection created"
-        );
+            .await
+        {
+            tracing::warn!(error = %e, "Could not create Qdrant collection, it may already exist or be unavailable");
+        } else {
+            tracing::info!(
+                collection = %self.collection_name,
+                dimension = dimension,
+                "Qdrant collection created"
+            );
+        }
         Ok(())
     }
 
@@ -167,6 +186,24 @@ impl HivemindVectorStore {
         let filter = Filter::must([qdrant_client::qdrant::Condition::matches(
             "metadata.meeting_id",
             meeting_id.to_string(),
+        )]);
+
+        self.client
+            .delete_points(
+                qdrant_client::qdrant::DeletePointsBuilder::new(&self.collection_name)
+                    .points(filter)
+                    .wait(true),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete all points for a knowledge document.
+    pub async fn delete_for_document(&self, document_id: Uuid) -> anyhow::Result<()> {
+        let filter = Filter::must([qdrant_client::qdrant::Condition::matches(
+            "metadata.document_id",
+            document_id.to_string(),
         )]);
 
         self.client

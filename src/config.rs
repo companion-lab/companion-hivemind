@@ -2,35 +2,74 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
+    #[serde(default = "default_db_host")]
     pub db_host: String,
+    #[serde(default = "default_db_port")]
     pub db_port: u16,
+    #[serde(default = "default_db_name")]
     pub db_name: String,
+    #[serde(default = "default_db_user")]
     pub db_user: String,
+    #[serde(default = "default_db_password")]
     pub db_password: String,
+    #[serde(default = "default_db_max_connections")]
     pub db_max_connections: u32,
+    #[serde(default = "default_db_schema")]
     pub db_schema: String,
 
+    #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
+    #[serde(default = "default_jwt_ttl_seconds")]
     pub jwt_ttl_seconds: i64,
 
+    #[serde(default = "default_encryption_secret")]
     pub encryption_secret: String,
 
+    #[serde(default = "default_vexa_api_url")]
     pub vexa_api_url: String,
+    #[serde(default = "default_vexa_admin_api_url")]
     pub vexa_admin_api_url: String,
+    #[serde(default)]
     pub vexa_admin_token: String,
 
+    #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
 
-    // ─── Embeddings (OpenRouter / OpenAI-compatible) ───────
+    // ─── Embeddings (Ollama) ──────────────────────────────
+    #[serde(default = "default_embedding_api_url")]
     pub embedding_api_url: String,
+    #[serde(default)]
     pub embedding_api_key: String,
+    #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
 
     // ─── Qdrant ────────────────────────────────────────────
+    #[serde(default = "default_qdrant_url")]
     pub qdrant_url: String,
+    #[serde(default)]
     pub qdrant_api_key: String,
 }
+
+// Default functions for serde
+fn default_db_host() -> String { "supabase-db".into() }
+fn default_db_port() -> u16 { 5432 }
+fn default_db_name() -> String { "postgres".into() }
+fn default_db_user() -> String { "postgres".into() }
+fn default_db_password() -> String { "postgres".into() }
+fn default_db_max_connections() -> u32 { 10 }
+fn default_db_schema() -> String { "hivemind".into() }
+fn default_jwt_secret() -> String { "hivemind-secret-change-me".into() }
+fn default_jwt_ttl_seconds() -> i64 { 30 * 24 * 60 * 60 }
+fn default_encryption_secret() -> String { "hivemind-encryption-secret-change-me".into() }
+fn default_vexa_api_url() -> String { "http://vexa-api-gateway:8000".into() }
+fn default_vexa_admin_api_url() -> String { "http://vexa-admin-api:8001".into() }
+fn default_host() -> String { "0.0.0.0".into() }
+fn default_port() -> u16 { 9100 }
+fn default_embedding_api_url() -> String { "http://localhost:11434".into() }
+fn default_embedding_model() -> String { "nomic-embed-text".into() }
+fn default_qdrant_url() -> String { "http://localhost:6334".into() }
 
 impl Settings {
     pub fn normalized_db_schema(&self) -> String {
@@ -46,31 +85,31 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            db_host: "supabase-db".into(),
-            db_port: 5432,
-            db_name: "postgres".into(),
-            db_user: "postgres".into(),
-            db_password: "postgres".into(),
-            db_max_connections: 10,
-            db_schema: "hivemind".into(),
+            db_host: default_db_host(),
+            db_port: default_db_port(),
+            db_name: default_db_name(),
+            db_user: default_db_user(),
+            db_password: default_db_password(),
+            db_max_connections: default_db_max_connections(),
+            db_schema: default_db_schema(),
 
-            jwt_secret: "hivemind-secret-change-me".into(),
-            jwt_ttl_seconds: 30 * 24 * 60 * 60,
+            jwt_secret: default_jwt_secret(),
+            jwt_ttl_seconds: default_jwt_ttl_seconds(),
 
-            encryption_secret: "hivemind-encryption-secret-change-me".into(),
+            encryption_secret: default_encryption_secret(),
 
-            vexa_api_url: "http://vexa-api-gateway:8000".into(),
-            vexa_admin_api_url: "http://vexa-admin-api:8001".into(),
+            vexa_api_url: default_vexa_api_url(),
+            vexa_admin_api_url: default_vexa_admin_api_url(),
             vexa_admin_token: String::new(),
 
-            host: "0.0.0.0".into(),
-            port: 9100,
+            host: default_host(),
+            port: default_port(),
 
-            embedding_api_url: "https://openrouter.ai/api/v1/embeddings".into(),
+            embedding_api_url: default_embedding_api_url(),
             embedding_api_key: String::new(),
-            embedding_model: "openai/text-embedding-3-small".into(),
+            embedding_model: default_embedding_model(),
 
-            qdrant_url: "http://localhost:6334".into(),
+            qdrant_url: default_qdrant_url(),
             qdrant_api_key: String::new(),
         }
     }
@@ -78,10 +117,23 @@ impl Default for Settings {
 
 pub fn load() -> Settings {
     dotenvy::dotenv().ok();
-    config::Config::builder()
+    let result = config::Config::builder()
         .add_source(config::Environment::default().separator("__"))
-        .build()
-        .ok()
-        .and_then(|c| c.try_deserialize().ok())
-        .unwrap_or_default()
+        .build();
+    
+    match result {
+        Ok(c) => {
+            match c.try_deserialize::<Settings>() {
+                Ok(settings) => settings,
+                Err(e) => {
+                    eprintln!("Failed to deserialize config: {}", e);
+                    Settings::default()
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to build config: {}", e);
+            Settings::default()
+        }
+    }
 }

@@ -41,13 +41,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = config::load();
+    tracing::info!("Embedding config: url={} model={}", settings.embedding_api_url, settings.embedding_model);
     let db = db::connect(&settings).await?;
 
-    // Initialize embedding service (OpenRouter / OpenAI-compatible)
-    let embedder = Arc::new(HivemindEmbedder::new(
-        &settings.embedding_api_key,
+    // Initialize embedding service (Ollama)
+    let embedder = Arc::new(HivemindEmbedder::new_ollama(
+        &settings.embedding_api_url,
         &settings.embedding_model,
-        Some(&settings.embedding_api_url),
     ));
 
     // Initialize Qdrant vector store

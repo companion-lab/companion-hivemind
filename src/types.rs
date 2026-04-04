@@ -14,6 +14,7 @@ pub struct Claims {
 #[derive(Debug, Deserialize)]
 pub struct RegisterAdminRequest {
     pub company_name: String,
+    pub company_slug: Option<String>,
     pub email: String,
     pub name: String,
     pub password: String,
@@ -182,6 +183,23 @@ pub struct KnowledgeSearchResult {
     pub chunk: serde_json::Value,
     pub meeting: serde_json::Value,
     pub score: f64,
+}
+
+// ─── Knowledge Documents (PDF uploads) ─────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct KnowledgeDocumentOut {
+    pub id: Uuid,
+    pub company_id: Uuid,
+    pub user_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub file_size: i64,
+    pub status: String,
+    pub chunk_count: i32,
+    pub metadata: serde_json::Value,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 // ─── Usage ──────────────────────────────────────────────────────────────────

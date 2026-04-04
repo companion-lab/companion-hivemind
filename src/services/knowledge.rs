@@ -14,12 +14,6 @@ const CHUNK_OVERLAP: usize = 80;
 
 pub struct KnowledgeService;
 
-/// A knowledge document ready for vector ingestion.
-pub struct KnowledgeDocument {
-    pub content: String,
-    pub metadata: serde_json::Value,
-}
-
 impl KnowledgeService {
     /// Chunk a transcript into langchain-rust Documents with metadata.
     pub fn chunk_transcript(
@@ -98,6 +92,45 @@ impl KnowledgeService {
         Ok(())
     }
 
+    /// Ingest PDF document chunks into Postgres and Qdrant.
+    pub async fn ingest_pdf_documents(
+        db: &PgPool,
+        vector_store: &HivemindVectorStore,
+        company_id: Uuid,
+        document_id: Uuid,
+        docs: &[Document],
+    ) -> Result<(), AppError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX epoch")
+            .as_millis() as i64;
+
+        for doc in docs {
+            let _chunk_index = doc.metadata.get("chunk_index").and_then(|v| v.as_i64());
+            let metadata_json = serde_json::to_value(&doc.metadata).unwrap_or(serde_json::json!({}));
+
+            sqlx::query(
+                "INSERT INTO knowledge_chunks (id, document_id, text, chunk_type, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(document_id)
+            .bind(&doc.page_content)
+            .bind("pdf_document")
+            .bind(&metadata_json)
+            .bind(now)
+            .execute(db)
+            .await
+            .map_err(AppError::from)?;
+        }
+
+        vector_store
+            .add_documents_for_company(company_id, docs)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to add PDF documents to vector store: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Search knowledge using vector similarity via Qdrant.
     pub async fn search(
         db: &PgPool,
@@ -167,7 +200,7 @@ impl KnowledgeService {
     }
 }
 
-fn split_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
+pub fn split_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut chunks = Vec::new();
     let mut i = 0;

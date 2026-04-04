@@ -2,7 +2,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use crate::types::{AuthSession, Claims, RegisterAdminRequest, RegisterMemberRequest, SignInRequest};
+use crate::types::{AuthSession, Claims};
 
 pub struct AuthRepo {
     db: PgPool,
@@ -151,7 +151,8 @@ impl AuthRepo {
 
     pub async fn create_auth_token(&self, token: &str, user_id: Uuid, company_id: Uuid, now: i64, expires_at: i64) -> Result<(), AppError> {
         sqlx::query(
-            r#"INSERT INTO auth_tokens (token, user_id, company_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)"#,
+            r#"INSERT INTO auth_tokens (token, user_id, company_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (token) DO UPDATE SET expires_at = $5, created_at = $4"#,
         )
         .bind(token)
         .bind(user_id)

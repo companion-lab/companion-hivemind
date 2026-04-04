@@ -1,7 +1,7 @@
-use anyhow::Result;
 use uuid::Uuid;
 
 use crate::config::Settings;
+use crate::errors::AppError;
 use crate::repos::auth::{self, AuthRepo};
 use crate::types::{AuthSession, RegisterAdminRequest, RegisterMemberRequest, SignInRequest};
 
@@ -14,25 +14,25 @@ impl AuthService {
         repo: &AuthRepo,
         settings: &Settings,
         req: RegisterAdminRequest,
-    ) -> Result<AuthSession> {
+    ) -> Result<AuthSession, AppError> {
         if req.company_name.trim().is_empty() {
-            anyhow::bail!("Company name is required");
+            return Err(AppError::BadRequest("Company name is required".into()));
         }
         if !req.email.contains('@') {
-            anyhow::bail!("Valid email is required");
+            return Err(AppError::BadRequest("Valid email is required".into()));
         }
         if req.password.len() < 8 {
-            anyhow::bail!("Password must be at least 8 characters");
+            return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
         }
 
         if repo.find_user_by_email(&req.email).await?.is_some() {
-            anyhow::bail!("Email already registered");
+            return Err(AppError::BadRequest("Email already registered".into()));
         }
 
         let now = crate::util::now_ms();
         let company_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
-        let slug = auth::slugify(&req.company_name);
+        let slug = req.company_slug.clone().unwrap_or_else(|| auth::slugify(&req.company_name));
         let password_hash = auth::hash_password(&req.password)?;
 
         repo.create_company(company_id, &req.company_name, &slug, now).await?;
@@ -67,26 +67,26 @@ impl AuthService {
         repo: &AuthRepo,
         settings: &Settings,
         req: RegisterMemberRequest,
-    ) -> Result<AuthSession> {
+    ) -> Result<AuthSession, AppError> {
         if !req.email.contains('@') {
-            anyhow::bail!("Valid email is required");
+            return Err(AppError::BadRequest("Valid email is required".into()));
         }
         if req.password.len() < 8 {
-            anyhow::bail!("Password must be at least 8 characters");
+            return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
         }
 
         let company = repo
             .find_company_by_slug(&req.company_slug)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Company not found"))?;
+            .ok_or_else(|| AppError::BadRequest("Company not found".into()))?;
 
         let invite = repo
             .find_invite(&req.email, company.id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("No invitation found"))?;
+            .ok_or_else(|| AppError::BadRequest("No invitation found".into()))?;
 
         if repo.find_user_by_email(&req.email).await?.is_some() {
-            anyhow::bail!("Email already registered");
+            return Err(AppError::BadRequest("Email already registered".into()));
         }
 
         let now = crate::util::now_ms();
@@ -124,20 +124,20 @@ impl AuthService {
         repo: &AuthRepo,
         settings: &Settings,
         req: SignInRequest,
-    ) -> Result<AuthSession> {
+    ) -> Result<AuthSession, AppError> {
         let user = repo
             .find_user_by_email(&req.email)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("No account found"))?;
+            .ok_or_else(|| AppError::Unauthorized("No account found".into()))?;
 
         if !auth::verify_password(&req.password, &user.password_hash)? {
-            anyhow::bail!("Incorrect password");
+            return Err(AppError::Unauthorized("Incorrect password".into()));
         }
 
         let membership = repo
             .find_membership(user.id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("No company membership found"))?;
+            .ok_or_else(|| AppError::Unauthorized("No company membership found".into()))?;
 
         let company = repo.find_company_by_id(membership.company_id).await?;
 

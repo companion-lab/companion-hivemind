@@ -10,6 +10,9 @@ pub async fn connect(settings: &Settings) -> anyhow::Result<PgPool> {
             move |conn, _meta| {
                 let schema = schema.clone();
                 Box::pin(async move {
+                    // Ensure schema exists before setting search_path
+                    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema.replace('"', "\"\""));
+                    conn.execute(create_schema.as_str()).await?;
                     let query = format!("SET search_path TO \"{}\"", schema.replace('"', "\"\""));
                     conn.execute(query.as_str()).await?;
                     Ok(())

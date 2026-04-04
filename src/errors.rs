@@ -36,7 +36,11 @@ impl IntoResponse for AppError {
             ),
         };
 
+        // Log full error chain for debugging
         tracing::error!(error = %self, "Request error");
+        if let AppError::Internal(e) = &self {
+            tracing::error!("Internal error chain: {:?}", e);
+        }
 
         let body = Json(serde_json::json!({
             "ok": false,
@@ -49,6 +53,20 @@ impl IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
-        AppError::Internal(err.into())
+        match &err {
+            sqlx::Error::Database(db_err) => {
+                let msg = db_err.message();
+                // Check for unique constraint violations
+                if msg.contains("unique") || msg.contains("duplicate") || msg.contains("already exists") || msg.contains("UNIQUE") {
+                    return AppError::Conflict(msg.to_string());
+                }
+                // Check for foreign key violations
+                if msg.contains("foreign key") || msg.contains("violates") {
+                    return AppError::BadRequest(msg.to_string());
+                }
+                AppError::Internal(err.into())
+            }
+            _ => AppError::Internal(err.into()),
+        }
     }
 }

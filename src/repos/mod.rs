@@ -8,3 +8,4 @@ pub mod session;
 pub mod message;
 pub mod trace;
 pub mod usage;
+pub mod knowledge;

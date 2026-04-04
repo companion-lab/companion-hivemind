@@ -47,10 +47,10 @@ impl UsageRepo {
         let rows = sqlx::query(
             r#"
             SELECT tu.user_id,
-                   SUM(tu.input_tokens) as total_input_tokens,
-                   SUM(tu.output_tokens) as total_output_tokens,
-                   SUM(tu.cost_cents) as total_cost_cents,
-                   COUNT(DISTINCT tu.session_id) as session_count,
+                   SUM(tu.input_tokens)::bigint as total_input_tokens,
+                   SUM(tu.output_tokens)::bigint as total_output_tokens,
+                   SUM(tu.cost_cents)::bigint as total_cost_cents,
+                   COUNT(DISTINCT tu.session_id)::bigint as session_count,
                    MAX(tu.recorded_at) as last_active_at
             FROM token_usage tu
             WHERE tu.company_id = $1
