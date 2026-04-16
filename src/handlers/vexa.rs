@@ -8,7 +8,7 @@ use crate::middleware::AuthContext;
 pub async fn request_bot(
     State(state): State<AppState>,
     _auth: AuthContext,
-    Json(body): Json<serde_json::Value>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let client = reqwest::Client::new();
     let mut body = body;
