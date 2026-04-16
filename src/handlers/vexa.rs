@@ -11,6 +11,17 @@ pub async fn request_bot(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let client = reqwest::Client::new();
+    let mut body = body;
+    if body.get("bot_name").is_none() {
+        let company_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM hivemind.companies WHERE id = $1"
+        )
+        .bind(_auth.company_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|_| "Companion".to_string());
+        body["bot_name"] = serde_json::Value::String(format!("{} companion", company_name));
+    }
     let resp = client
         .post(format!("{}/bots", state.settings.vexa_api_url))
         .header("X-API-Key", &state.settings.vexa_admin_token)
@@ -33,6 +44,17 @@ pub async fn get_meetings(
     _auth: AuthContext,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let client = reqwest::Client::new();
+    let mut body = body;
+    if body.get("bot_name").is_none() {
+        let company_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM hivemind.companies WHERE id = $1"
+        )
+        .bind(_auth.company_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|_| "Companion".to_string());
+        body["bot_name"] = serde_json::Value::String(format!("{} companion", company_name));
+    }
     let resp = client
         .get(format!("{}/meetings", state.settings.vexa_api_url))
         .header("X-API-Key", &state.settings.vexa_admin_token)
